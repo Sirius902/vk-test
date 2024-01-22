@@ -1,4 +1,5 @@
 const std = @import("std");
+const vkgen = @import("vulkan_zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -17,8 +18,9 @@ pub fn build(b: *std.Build) void {
     // @import("mach_glfw").link(mach_glfw.builder, exe);
 
     exe.linkLibC();
-    linkGlfw(b, exe, &target);
+    linkGlfw(b, exe, target);
     linkVulkan(b, exe);
+    linkShaders(b, exe);
 
     b.installArtifact(exe);
 
@@ -45,7 +47,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_unit_tests.step);
 }
 
-fn linkGlfw(b: *std.Build, compile: *std.Build.Step.Compile, target: *const std.Build.ResolvedTarget) void {
+fn linkGlfw(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
     // Try to link libs using vcpkg on Windows
     if (target.result.os.tag == .windows) {
         const vcpkg_root = std.process.getEnvVarOwned(b.allocator, "VCPKG_ROOT") catch |err|
@@ -109,5 +111,17 @@ fn linkVulkan(b: *std.Build, compile: *std.Build.Step.Compile) void {
 
     const vkzig = b.dependency("vulkan_zig", .{ .registry = @as([]const u8, registry_path) });
     const vkzig_bindings = vkzig.module("vulkan-zig");
-    compile.root_module.addImport("vulkan-zig", vkzig_bindings);
+    compile.root_module.addImport("vulkan", vkzig_bindings);
+}
+
+fn linkShaders(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    const shaders = vkgen.ShaderCompileStep.create(
+        b,
+        &[_][]const u8{ "glslc", "--target-env=vulkan1.3" },
+        "-o",
+    );
+
+    shaders.add("triangle_vert", "src/shaders/triangle.vert", .{});
+    shaders.add("triangle_frag", "src/shaders/triangle.frag", .{});
+    compile.root_module.addImport("shaders", shaders.getModule());
 }
