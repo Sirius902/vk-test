@@ -17,54 +17,8 @@ pub fn build(b: *std.Build) void {
     // @import("mach_glfw").link(mach_glfw.builder, exe);
 
     exe.linkLibC();
-
-    // Try to link libs using vcpkg on Windows
-    if (target.result.os.tag == .windows) {
-        const vcpkg_root = std.process.getEnvVarOwned(b.allocator, "VCPKG_ROOT") catch |err|
-            std.debug.panic("Expected VCPKG_ROOT env to be found: {}", .{err});
-
-        const arch_str = switch (target.result.cpu.arch) {
-            .x86 => "x86",
-            .x86_64 => "x64",
-            else => std.debug.panic("Unsupported CPU architecture: {}", .{target.result.cpu.arch}),
-        };
-
-        const vcpkg_installed_arch_path = std.fs.path.join(b.allocator, &[_][]const u8{
-            vcpkg_root,
-            "installed",
-            std.mem.concat(b.allocator, u8, &[_][]const u8{ arch_str, "-windows" }) catch unreachable,
-        }) catch unreachable;
-
-        const vcpkg_lib_path = std.fs.path.join(b.allocator, &[_][]const u8{
-            vcpkg_installed_arch_path,
-            "lib",
-        }) catch unreachable;
-
-        const vcpkg_include_path = std.fs.path.join(b.allocator, &[_][]const u8{
-            vcpkg_installed_arch_path,
-            "include",
-        }) catch unreachable;
-
-        const glfw_name = "glfw3";
-
-        exe.addIncludePath(.{ .path = vcpkg_include_path });
-        exe.addLibraryPath(.{ .path = vcpkg_lib_path });
-        exe.linkSystemLibrary(glfw_name ++ "dll");
-
-        const vcpkg_bin_path = std.fs.path.join(b.allocator, &[_][]const u8{
-            vcpkg_installed_arch_path,
-            "bin",
-        }) catch unreachable;
-
-        inline for (.{ ".dll", ".pdb" }) |prefix| {
-            b.installBinFile(
-                std.fs.path.join(b.allocator, &[_][]const u8{ vcpkg_bin_path, glfw_name ++ prefix }) catch unreachable,
-                glfw_name ++ prefix,
-            );
-        }
-    } else {
-        exe.linkSystemLibrary("glfw");
-    }
+    linkGlfw(b, exe, &target);
+    linkVulkan(b, exe);
 
     b.installArtifact(exe);
 
@@ -89,4 +43,71 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
+}
+
+fn linkGlfw(b: *std.Build, compile: *std.Build.Step.Compile, target: *const std.Build.ResolvedTarget) void {
+    // Try to link libs using vcpkg on Windows
+    if (target.result.os.tag == .windows) {
+        const vcpkg_root = std.process.getEnvVarOwned(b.allocator, "VCPKG_ROOT") catch |err|
+            std.debug.panic("Expected VCPKG_ROOT env to be found: {}", .{err});
+
+        const arch_str = switch (target.result.cpu.arch) {
+            .x86 => "x86",
+            .x86_64 => "x64",
+            else => std.debug.panic("Unsupported CPU architecture: {}", .{target.result.cpu.arch}),
+        };
+
+        const vcpkg_installed_arch_path = b.pathJoin(&[_][]const u8{
+            vcpkg_root,
+            "installed",
+            std.mem.concat(b.allocator, u8, &[_][]const u8{ arch_str, "-windows" }) catch unreachable,
+        });
+
+        const vcpkg_lib_path = b.pathJoin(&[_][]const u8{
+            vcpkg_installed_arch_path,
+            "lib",
+        });
+
+        const vcpkg_include_path = b.pathJoin(&[_][]const u8{
+            vcpkg_installed_arch_path,
+            "include",
+        });
+
+        const glfw_name = "glfw3";
+
+        compile.addIncludePath(.{ .path = vcpkg_include_path });
+        compile.addLibraryPath(.{ .path = vcpkg_lib_path });
+        compile.linkSystemLibrary(glfw_name ++ "dll");
+
+        const vcpkg_bin_path = b.pathJoin(&[_][]const u8{
+            vcpkg_installed_arch_path,
+            "bin",
+        });
+
+        inline for (.{ ".dll", ".pdb" }) |prefix| {
+            b.installBinFile(
+                b.pathJoin(&[_][]const u8{ vcpkg_bin_path, glfw_name ++ prefix }),
+                glfw_name ++ prefix,
+            );
+        }
+    } else {
+        compile.linkSystemLibrary("glfw");
+    }
+}
+
+fn linkVulkan(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    const vulkan_sdk_root = std.process.getEnvVarOwned(b.allocator, "VULKAN_SDK") catch |err|
+        std.debug.panic("Expected VULKAN_SDK env to be found: {}", .{err});
+
+    const registry_path = b.pathJoin(&[_][]const u8{
+        vulkan_sdk_root,
+        "share",
+        "vulkan",
+        "registry",
+        "vk.xml",
+    });
+
+    const vkzig = b.dependency("vulkan_zig", .{ .registry = @as([]const u8, registry_path) });
+    const vkzig_bindings = vkzig.module("vulkan-zig");
+    compile.root_module.addImport("vulkan-zig", vkzig_bindings);
 }
