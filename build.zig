@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
 
     exe.linkLibC();
     linkGlfw(b, exe, target);
-    linkVulkan(b, exe);
+    linkVulkan(b, exe, target);
     linkShaders(b, exe);
 
     b.installArtifact(exe);
@@ -97,17 +97,19 @@ fn linkGlfw(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.R
     }
 }
 
-fn linkVulkan(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    const vulkan_sdk_root = std.process.getEnvVarOwned(b.allocator, "VULKAN_SDK") catch |err|
-        std.debug.panic("Expected VULKAN_SDK env to be found: {}", .{err});
+fn linkVulkan(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
+    const registry_path = if (target.result.os.tag == .windows) blk: {
+        const vulkan_sdk_root = std.process.getEnvVarOwned(b.allocator, "VULKAN_SDK") catch |err|
+            std.debug.panic("Expected VULKAN_SDK env to be found: {}", .{err});
 
-    const registry_path = b.pathJoin(&[_][]const u8{
-        vulkan_sdk_root,
-        "share",
-        "vulkan",
-        "registry",
-        "vk.xml",
-    });
+        break :blk b.pathJoin(&[_][]const u8{
+            vulkan_sdk_root,
+            "share",
+            "vulkan",
+            "registry",
+            "vk.xml",
+        });
+    } else "/usr/share/vulkan/registry/vk.xml";
 
     const vkzig = b.dependency("vulkan_zig", .{ .registry = @as([]const u8, registry_path) });
     const vkzig_bindings = vkzig.module("vulkan-zig");
