@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
     linkGlfw(b, exe, target);
     linkVulkan(b, exe, target);
     linkShaders(b, exe);
+    linkImGui(b, exe, target);
 
     b.installArtifact(exe);
 
@@ -81,12 +82,7 @@ fn linkGlfw(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.R
             "bin",
         });
 
-        inline for (.{ ".dll", ".pdb" }) |prefix| {
-            b.installBinFile(
-                b.pathJoin(&[_][]const u8{ vcpkg_bin_path, glfw_name ++ prefix }),
-                glfw_name ++ prefix,
-            );
-        }
+        _ = installSharedLibWindows(b, vcpkg_bin_path, glfw_name);
     } else {
         compile.linkSystemLibrary("glfw");
     }
@@ -121,4 +117,61 @@ fn linkShaders(b: *std.Build, compile: *std.Build.Step.Compile) void {
     shaders.add("triangle_vert", "src/shaders/triangle.vert", .{});
     shaders.add("triangle_frag", "src/shaders/triangle.frag", .{});
     compile.root_module.addImport("shaders", shaders.getModule());
+}
+
+fn linkImGui(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
+    const cimgui_dir = "external/cimgui";
+    const cimgui_build_dir = b.pathJoin(&[_][]const u8{ cimgui_dir, "build" });
+
+    const cmake_init = b.addSystemCommand(&[_][]const u8{
+        "cmake",
+        "-S",
+        cimgui_dir,
+        "-B",
+        cimgui_build_dir,
+        "-GNinja",
+        "-DCMAKE_C_COMPILER=zig;cc",
+        "-DCMAKE_CXX_COMPILER=zig;c++",
+    });
+
+    const cmake_build = b.addSystemCommand(&[_][]const u8{
+        "cmake",
+        "--build",
+        cimgui_build_dir,
+    });
+
+    cmake_build.step.dependOn(&cmake_init.step);
+    compile.step.dependOn(&cmake_build.step);
+
+    compile.addIncludePath(.{ .path = cimgui_dir });
+    compile.addLibraryPath(.{ .path = cimgui_build_dir });
+
+    if (target.result.os.tag == .windows) {
+        compile.linkSystemLibrary("cimgui.dll");
+
+        const install_lib = installSharedLibWindows(b, cimgui_build_dir, "cimgui");
+        install_lib.step.dependOn(&cmake_build.step);
+    } else {
+        compile.linkSystemLibrary("cimgui");
+    }
+}
+
+fn installSharedLibWindows(b: *std.Build, src_dir: []const u8, lib_name: []const u8) *std.Build.Step.InstallFile {
+    const dll_name = b.fmt("{s}{s}", .{ lib_name, ".dll" });
+    const dll_path = b.pathJoin(&[_][]const u8{ src_dir, dll_name });
+
+    const pdb_name = b.fmt("{s}{s}", .{ lib_name, ".pdb" });
+    const pdb_path = b.pathJoin(&[_][]const u8{ src_dir, pdb_name });
+
+    const install_dll = b.addInstallBinFile(.{ .path = dll_path }, dll_name);
+
+    // Make sure pdb file exists before trying to install it
+    if (std.fs.cwd().openFile(pdb_path, .{})) |pdb_file| {
+        pdb_file.close();
+
+        const install_pdb = b.addInstallBinFile(.{ .path = pdb_path }, pdb_name);
+        install_pdb.step.dependOn(&install_dll.step);
+    } else |_| {}
+
+    return install_dll;
 }

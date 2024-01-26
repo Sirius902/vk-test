@@ -1,6 +1,8 @@
 pub usingnamespace @cImport({
     @cDefine("GLFW_INCLUDE_NONE", {});
     @cInclude("GLFW/glfw3.h");
+    @cDefine("CIMGUI_DEFINE_ENUMS_AND_STRUCTS", {});
+    @cInclude("cimgui.h");
 });
 
 const vk = @import("vulkan");
