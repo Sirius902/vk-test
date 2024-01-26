@@ -12,11 +12,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // TODO: Switch to using mach-glfw when it supports the latest zig master.
-    // const mach_glfw = b.dependency("mach_glfw", .{ .target = target, .optimize = optimize });
-    // exe.root_module.addImport("mach-glfw", mach_glfw.module("mach-glfw"));
-    // @import("mach_glfw").link(mach_glfw.builder, exe);
-
     exe.linkLibC();
     linkGlfw(b, exe, target);
     linkVulkan(b, exe, target);
