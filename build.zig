@@ -19,10 +19,10 @@ pub fn build(b: *std.Build) void {
         exe.linkLibCpp();
     }
 
-    linkGlfw(b, exe, target);
+    linkGlfw(b, exe, target, optimize);
     linkVulkan(b, exe, target);
     linkShaders(b, exe);
-    linkImGui(b, exe, target);
+    linkImGui(b, exe, target, optimize);
 
     b.installArtifact(exe);
 
@@ -49,7 +49,12 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_unit_tests.step);
 }
 
-fn linkGlfw(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
+fn linkGlfw(
+    b: *std.Build,
+    compile: *std.Build.Step.Compile,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) void {
     // Try to link libs using vcpkg on Windows
     if (target.result.os.tag == .windows) {
         const vcpkg_root = std.process.getEnvVarOwned(b.allocator, "VCPKG_ROOT") catch |err|
@@ -67,10 +72,17 @@ fn linkGlfw(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.R
             std.mem.concat(b.allocator, u8, &[_][]const u8{ arch_str, "-windows" }) catch unreachable,
         });
 
-        const vcpkg_lib_path = b.pathJoin(&[_][]const u8{
-            vcpkg_installed_arch_path,
-            "lib",
-        });
+        const vcpkg_lib_path = if (optimize == .Debug)
+            b.pathJoin(&[_][]const u8{
+                vcpkg_installed_arch_path,
+                "debug",
+                "lib",
+            })
+        else
+            b.pathJoin(&[_][]const u8{
+                vcpkg_installed_arch_path,
+                "lib",
+            });
 
         const vcpkg_include_path = b.pathJoin(&[_][]const u8{
             vcpkg_installed_arch_path,
@@ -83,10 +95,17 @@ fn linkGlfw(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.R
         compile.addLibraryPath(.{ .path = vcpkg_lib_path });
         compile.linkSystemLibrary(glfw_name ++ "dll");
 
-        const vcpkg_bin_path = b.pathJoin(&[_][]const u8{
-            vcpkg_installed_arch_path,
-            "bin",
-        });
+        const vcpkg_bin_path = if (optimize == .Debug)
+            b.pathJoin(&[_][]const u8{
+                vcpkg_installed_arch_path,
+                "debug",
+                "bin",
+            })
+        else
+            b.pathJoin(&[_][]const u8{
+                vcpkg_installed_arch_path,
+                "bin",
+            });
 
         const install_lib = installSharedLibWindows(b, vcpkg_bin_path, glfw_name);
         compile.step.dependOn(&install_lib.step);
@@ -127,19 +146,24 @@ fn linkShaders(b: *std.Build, compile: *std.Build.Step.Compile) void {
 }
 
 // TODO: I kinda hate this but it works
-fn linkImGui(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
+fn linkImGui(
+    b: *std.Build,
+    compile: *std.Build.Step.Compile,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) void {
     const cimgui_dir = "external/cimgui";
     const cimgui_build_dir = b.pathJoin(&[_][]const u8{ b.cache_root.path orelse ".", "cimgui-build" });
 
     const cmake_build = b.addSystemCommand(&[_][]const u8{ "cmake", "--build", cimgui_build_dir });
     compile.step.dependOn(&cmake_build.step);
 
-    // Don't configure the cmake project if already configured
+    // TODO: Reconfigure if CLI args are different.
+    // Don't configure the cmake project if already configured.
     var cimgui_build_dir_handle = std.fs.cwd().openDir(cimgui_build_dir, .{});
     if (cimgui_build_dir_handle) |*dir| {
         dir.close();
     } else |_| {
-        // TODO: Use build optimization level for lib
         const cmake_init = b.addSystemCommand(&[_][]const u8{
             "cmake",
             "-S",
@@ -148,6 +172,7 @@ fn linkImGui(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.
             cimgui_build_dir,
             "-GNinja",
             "-DCMAKE_CXX_COMPILER=zig;c++",
+            b.fmt("-DCMAKE_BUILD_TYPE={s}", .{if (optimize == .Debug) "Debug" else "Release"}),
         });
 
         if (target.result.os.tag == .windows) {
