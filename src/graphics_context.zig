@@ -224,7 +224,7 @@ pub const GraphicsContext = struct {
         _ = message_types;
         const self: *GraphicsContext = @alignCast(@ptrCast(user_data.?));
         _ = self;
-        log.debug("{s}", .{callback_data.?.p_message});
+        log.debug("{s}", .{callback_data.?.p_message.?});
         return vk.FALSE;
     }
 };
