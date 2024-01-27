@@ -21,11 +21,17 @@ pub const Swapchain = struct {
         suboptimal,
     };
 
-    pub fn init(gc: *const GraphicsContext, allocator: Allocator, extent: vk.Extent2D) !Swapchain {
-        return try initRecycle(gc, allocator, extent, .null_handle);
+    pub fn init(gc: *const GraphicsContext, allocator: Allocator, extent: vk.Extent2D, wait_for_vsync: bool) !Swapchain {
+        return try initRecycle(gc, allocator, extent, wait_for_vsync, .null_handle);
     }
 
-    pub fn initRecycle(gc: *const GraphicsContext, allocator: Allocator, extent: vk.Extent2D, old_handle: vk.SwapchainKHR) !Swapchain {
+    pub fn initRecycle(
+        gc: *const GraphicsContext,
+        allocator: Allocator,
+        extent: vk.Extent2D,
+        wait_for_vsync: bool,
+        old_handle: vk.SwapchainKHR,
+    ) !Swapchain {
         const caps = try gc.vki.getPhysicalDeviceSurfaceCapabilitiesKHR(gc.pdev, gc.surface);
         const actual_extent = findActualExtent(caps, extent);
         if (actual_extent.width == 0 or actual_extent.height == 0) {
@@ -33,7 +39,7 @@ pub const Swapchain = struct {
         }
 
         const surface_format = try findSurfaceFormat(gc, allocator);
-        const present_mode = try findPresentMode(gc, allocator);
+        const present_mode = if (wait_for_vsync) .fifo_khr else try findPresentMode(gc, allocator);
 
         var image_count = caps.min_image_count + 1;
         if (caps.max_image_count > 0) {
@@ -113,12 +119,12 @@ pub const Swapchain = struct {
         self.gc.vkd.destroySwapchainKHR(self.gc.dev, self.handle, null);
     }
 
-    pub fn recreate(self: *Swapchain, new_extent: vk.Extent2D) !void {
+    pub fn recreate(self: *Swapchain, new_extent: vk.Extent2D, wait_for_vsync: bool) !void {
         const gc = self.gc;
         const allocator = self.allocator;
         const old_handle = self.handle;
         self.deinitExceptSwapchain();
-        self.* = try initRecycle(gc, allocator, new_extent, old_handle);
+        self.* = try initRecycle(gc, allocator, new_extent, wait_for_vsync, old_handle);
     }
 
     pub fn currentImage(self: Swapchain) vk.Image {
@@ -129,7 +135,15 @@ pub const Swapchain = struct {
         return &self.swap_images[self.image_index];
     }
 
-    pub fn present(self: *Swapchain, cmdbuf: vk.CommandBuffer) !PresentState {
+    pub fn acquireImage(self: *Swapchain) !*const SwapImage {
+        // Step 1: Make sure the current frame has finished rendering
+        const current = self.currentSwapImage();
+        try current.waitForFence(self.gc);
+        try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&current.frame_fence));
+        return current;
+    }
+
+    pub fn present(self: *Swapchain, cmdbuf: vk.CommandBuffer, current: *const SwapImage) !PresentState {
         // Simple method:
         // 1) Acquire next image
         // 2) Wait for and reset fence of the acquired image
@@ -146,11 +160,6 @@ pub const Swapchain = struct {
         // 4) Acquire next image, signalling its semaphore
         // One problem that arises is that we can't know beforehand which semaphore to signal,
         // so we keep an extra auxilery semaphore that is swapped around
-
-        // Step 1: Make sure the current frame has finished rendering
-        const current = self.currentSwapImage();
-        try current.waitForFence(self.gc);
-        try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&current.frame_fence));
 
         // Step 2: Submit the command buffer
         const wait_stage = [_]vk.PipelineStageFlags{.{ .top_of_pipe_bit = true }};

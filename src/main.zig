@@ -40,6 +40,12 @@ const vertices = [_]Vertex{
     .{ .pos = .{ -0.5, 0.5 }, .color = .{ 0, 0, 1 } },
 };
 
+var is_demo_open = true;
+var is_config_open = true;
+
+var graphics_outdated = false;
+var wait_for_vsync = true;
+
 pub fn main() !void {
     if (c.glfwInit() != c.GLFW_TRUE) return error.GlfwInitFailed;
     defer c.glfwTerminate();
@@ -72,7 +78,7 @@ pub fn main() !void {
 
     std.log.debug("Using device: {s}", .{gc.deviceName()});
 
-    var swapchain = try Swapchain.init(gc, allocator, extent);
+    var swapchain = try Swapchain.init(gc, allocator, extent, wait_for_vsync);
     defer swapchain.deinit();
 
     const pipeline_layout = try gc.vkd.createPipelineLayout(gc.dev, &.{
@@ -87,7 +93,19 @@ pub fn main() !void {
     const render_pass = try createRenderPass(gc, swapchain);
     defer gc.vkd.destroyRenderPass(gc.dev, render_pass, null);
 
-    try initImGui(gc, window, render_pass);
+    const imgui_ini_path = blk: {
+        const exe_dir = try std.fs.selfExeDirPathAlloc(allocator);
+        defer allocator.free(exe_dir);
+
+        break :blk try std.fs.path.joinZ(
+            allocator,
+            &[_][]const u8{ exe_dir, "imgui.ini" },
+        );
+    };
+    defer allocator.free(imgui_ini_path);
+
+    const descriptor_pool = try initImGui(gc, &swapchain, render_pass, window, imgui_ini_path);
+    defer gc.vkd.destroyDescriptorPool(gc.dev, descriptor_pool, null);
     defer deinitImGui();
 
     const pipeline = try createPipeline(gc, pipeline_layout, render_pass);
@@ -98,6 +116,7 @@ pub fn main() !void {
 
     const pool = try gc.vkd.createCommandPool(gc.dev, &.{
         .queue_family_index = gc.graphics_queue.family,
+        .flags = .{ .reset_command_buffer_bit = true },
     }, null);
     defer gc.vkd.destroyCommandPool(gc.dev, pool, null);
 
@@ -118,10 +137,6 @@ pub fn main() !void {
         gc,
         pool,
         allocator,
-        buffer,
-        swapchain.extent,
-        render_pass,
-        pipeline,
         framebuffers,
     );
     defer destroyCommandBuffers(gc, pool, allocator, cmdbufs);
@@ -137,17 +152,45 @@ pub fn main() !void {
             continue;
         }
 
+        c.ImGui_ImplVulkan_NewFrame();
+        c.ImGui_ImplGlfw_NewFrame();
+        c.igNewFrame();
+
+        if (is_demo_open) c.igShowDemoWindow(&is_demo_open);
+        if (is_config_open) {
+            if (c.igBegin("Config", &is_config_open, c.ImGuiWindowFlags_None)) {
+                defer c.igEnd();
+
+                if (c.igCheckbox("Wait for VSync", &wait_for_vsync)) {
+                    graphics_outdated = true;
+                }
+            }
+        }
+
+        c.igRender();
+
         const cmdbuf = cmdbufs[swapchain.image_index];
 
-        const state = swapchain.present(cmdbuf) catch |err| switch (err) {
+        const current_image = try swapchain.acquireImage();
+        try recordCommandBuffer(
+            gc,
+            buffer,
+            swapchain.extent,
+            render_pass,
+            pipeline,
+            cmdbuf,
+            framebuffers[swapchain.image_index],
+        );
+
+        const state = swapchain.present(cmdbuf, current_image) catch |err| switch (err) {
             error.OutOfDateKHR => Swapchain.PresentState.suboptimal,
             else => |narrow| return narrow,
         };
 
-        if (state == .suboptimal or extent.width != @as(u32, @intCast(w)) or extent.height != @as(u32, @intCast(h))) {
+        if (state == .suboptimal or extent.width != @as(u32, @intCast(w)) or extent.height != @as(u32, @intCast(h)) or graphics_outdated) {
             extent.width = @intCast(w);
             extent.height = @intCast(h);
-            try swapchain.recreate(extent);
+            try swapchain.recreate(extent, wait_for_vsync);
 
             destroyFramebuffers(gc, allocator, framebuffers);
             framebuffers = try createFramebuffers(gc, allocator, render_pass, swapchain);
@@ -157,12 +200,10 @@ pub fn main() !void {
                 gc,
                 pool,
                 allocator,
-                buffer,
-                swapchain.extent,
-                render_pass,
-                pipeline,
                 framebuffers,
             );
+
+            graphics_outdated = false;
         }
 
         c.glfwPollEvents();
@@ -234,10 +275,6 @@ fn createCommandBuffers(
     gc: *const GraphicsContext,
     pool: vk.CommandPool,
     allocator: Allocator,
-    buffer: vk.Buffer,
-    extent: vk.Extent2D,
-    render_pass: vk.RenderPass,
-    pipeline: vk.Pipeline,
     framebuffers: []vk.Framebuffer,
 ) ![]vk.CommandBuffer {
     const cmdbufs = try allocator.alloc(vk.CommandBuffer, framebuffers.len);
@@ -246,10 +283,27 @@ fn createCommandBuffers(
     try gc.vkd.allocateCommandBuffers(gc.dev, &.{
         .command_pool = pool,
         .level = .primary,
-        .command_buffer_count = @as(u32, @truncate(cmdbufs.len)),
+        .command_buffer_count = @intCast(cmdbufs.len),
     }, cmdbufs.ptr);
     errdefer gc.vkd.freeCommandBuffers(gc.dev, pool, @truncate(cmdbufs.len), cmdbufs.ptr);
 
+    return cmdbufs;
+}
+
+fn destroyCommandBuffers(gc: *const GraphicsContext, pool: vk.CommandPool, allocator: Allocator, cmdbufs: []vk.CommandBuffer) void {
+    gc.vkd.freeCommandBuffers(gc.dev, pool, @truncate(cmdbufs.len), cmdbufs.ptr);
+    allocator.free(cmdbufs);
+}
+
+fn recordCommandBuffer(
+    gc: *const GraphicsContext,
+    buffer: vk.Buffer,
+    extent: vk.Extent2D,
+    render_pass: vk.RenderPass,
+    pipeline: vk.Pipeline,
+    cmdbuf: vk.CommandBuffer,
+    framebuffer: vk.Framebuffer,
+) !void {
     const clear = vk.ClearValue{
         .color = .{ .float_32 = .{ 0, 0, 0, 1 } },
     };
@@ -268,41 +322,35 @@ fn createCommandBuffers(
         .extent = extent,
     };
 
-    for (cmdbufs, framebuffers) |cmdbuf, framebuffer| {
-        try gc.vkd.beginCommandBuffer(cmdbuf, &.{});
+    try gc.vkd.resetCommandBuffer(cmdbuf, .{});
+    try gc.vkd.beginCommandBuffer(cmdbuf, &.{});
 
-        gc.vkd.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(&viewport));
-        gc.vkd.cmdSetScissor(cmdbuf, 0, 1, @ptrCast(&scissor));
+    gc.vkd.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(&viewport));
+    gc.vkd.cmdSetScissor(cmdbuf, 0, 1, @ptrCast(&scissor));
 
-        // This needs to be a separate definition - see https://github.com/ziglang/zig/issues/7627.
-        const render_area = vk.Rect2D{
-            .offset = .{ .x = 0, .y = 0 },
-            .extent = extent,
-        };
+    // This needs to be a separate definition - see https://github.com/ziglang/zig/issues/7627.
+    const render_area = vk.Rect2D{
+        .offset = .{ .x = 0, .y = 0 },
+        .extent = extent,
+    };
 
-        gc.vkd.cmdBeginRenderPass(cmdbuf, &.{
-            .render_pass = render_pass,
-            .framebuffer = framebuffer,
-            .render_area = render_area,
-            .clear_value_count = 1,
-            .p_clear_values = @as([*]const vk.ClearValue, @ptrCast(&clear)),
-        }, .@"inline");
+    gc.vkd.cmdBeginRenderPass(cmdbuf, &.{
+        .render_pass = render_pass,
+        .framebuffer = framebuffer,
+        .render_area = render_area,
+        .clear_value_count = 1,
+        .p_clear_values = @as([*]const vk.ClearValue, @ptrCast(&clear)),
+    }, .@"inline");
 
-        gc.vkd.cmdBindPipeline(cmdbuf, .graphics, pipeline);
-        const offset = [_]vk.DeviceSize{0};
-        gc.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, @ptrCast(&buffer), &offset);
-        gc.vkd.cmdDraw(cmdbuf, vertices.len, 1, 0, 0);
+    gc.vkd.cmdBindPipeline(cmdbuf, .graphics, pipeline);
+    const offset = [_]vk.DeviceSize{0};
+    gc.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, @ptrCast(&buffer), &offset);
+    gc.vkd.cmdDraw(cmdbuf, vertices.len, 1, 0, 0);
 
-        gc.vkd.cmdEndRenderPass(cmdbuf);
-        try gc.vkd.endCommandBuffer(cmdbuf);
-    }
+    c.ImGui_ImplVulkan_RenderDrawData(c.igGetDrawData(), cmdbuf, .null_handle);
 
-    return cmdbufs;
-}
-
-fn destroyCommandBuffers(gc: *const GraphicsContext, pool: vk.CommandPool, allocator: Allocator, cmdbufs: []vk.CommandBuffer) void {
-    gc.vkd.freeCommandBuffers(gc.dev, pool, @truncate(cmdbufs.len), cmdbufs.ptr);
-    allocator.free(cmdbufs);
+    gc.vkd.cmdEndRenderPass(cmdbuf);
+    try gc.vkd.endCommandBuffer(cmdbuf);
 }
 
 fn createFramebuffers(gc: *const GraphicsContext, allocator: Allocator, render_pass: vk.RenderPass, swapchain: Swapchain) ![]vk.Framebuffer {
@@ -491,31 +539,66 @@ fn createPipeline(
     return pipeline;
 }
 
-fn initImGui(gc: *const GraphicsContext, window: *c.GLFWwindow, render_pass: vk.RenderPass) !void {
+fn initImGui(
+    gc: *const GraphicsContext,
+    swapchain: *const Swapchain,
+    render_pass: vk.RenderPass,
+    window: *c.GLFWwindow,
+    ini_path: [*:0]const u8,
+) !vk.DescriptorPool {
     _ = c.igCreateContext(null);
 
-    if (!c.ImGui_ImplGlfw_InitForVulkan(window, true)) return error.ImGuiImplInit;
+    const io: *c.ImGuiIO = c.igGetIO();
+    io.IniFilename = ini_path;
 
-    _ = gc;
-    _ = render_pass;
+    c.igStyleColorsDark(null);
 
-    // var init_info = c.ImGui_ImplVulkan_InitInfo{
-    //     .Instance = gc.instance,
-    //     .PhysicalDevice = gc.pdev,
-    //     .Device = gc.dev,
-    //     .QueueFamily = gc.graphics_queue.family,
-    //     .Queue = gc.graphics_queue.handle,
-    //     .PipelineCache = undefined,
-    //     .DescriptorPool = undefined,
-    //     .Subpass = 0,
-    //     .MinImageCount = undefined,
-    // };
-    //
-    // c.ImGui_ImplVulkan_Init(&init_info, render_pass);
+    if (!c.ImGui_ImplGlfw_InitForVulkan(window, true)) return error.ImGuiGlfwInit;
+
+    const pool_sizes = [_]vk.DescriptorPoolSize{
+        .{ .type = .sampler, .descriptor_count = 1000 },
+        .{ .type = .combined_image_sampler, .descriptor_count = 1000 },
+        .{ .type = .sampled_image, .descriptor_count = 1000 },
+        .{ .type = .storage_image, .descriptor_count = 1000 },
+        .{ .type = .uniform_texel_buffer, .descriptor_count = 1000 },
+        .{ .type = .storage_texel_buffer, .descriptor_count = 1000 },
+        .{ .type = .uniform_buffer, .descriptor_count = 1000 },
+        .{ .type = .storage_buffer, .descriptor_count = 1000 },
+        .{ .type = .uniform_buffer_dynamic, .descriptor_count = 1000 },
+        .{ .type = .storage_buffer_dynamic, .descriptor_count = 1000 },
+        .{ .type = .input_attachment, .descriptor_count = 1000 },
+    };
+
+    const descriptor_pool = try gc.vkd.createDescriptorPool(gc.dev, &.{
+        .flags = .{ .free_descriptor_set_bit = true },
+        .max_sets = 1000 * pool_sizes.len,
+        .pool_size_count = @intCast(pool_sizes.len),
+        .p_pool_sizes = &pool_sizes,
+    }, null);
+
+    var init_info = c.ImGui_ImplVulkan_InitInfo{
+        .instance = gc.instance,
+        .physical_device = gc.pdev,
+        .device = gc.dev,
+        .queue_family = gc.graphics_queue.family,
+        .queue = gc.graphics_queue.handle,
+        .pipeline_cache = .null_handle,
+        .descriptor_pool = descriptor_pool,
+        .subpass = 0,
+        .min_image_count = 2,
+        .image_count = @intCast(swapchain.swap_images.len),
+        .msaa_samples = .{ .@"1_bit" = true },
+        .use_dynamic_rendering = false,
+        .color_attachment_format = swapchain.surface_format.format,
+        .min_allocation_size = 0,
+    };
+    if (!c.ImGui_ImplVulkan_Init(&init_info, render_pass)) return error.ImGuiVulkanInit;
+
+    return descriptor_pool;
 }
 
 fn deinitImGui() void {
-    // c.ImGui_ImplVulkan_Shutdown();
+    c.ImGui_ImplVulkan_Shutdown();
     c.ImGui_ImplGlfw_Shutdown();
     c.igDestroyContext(null);
 }

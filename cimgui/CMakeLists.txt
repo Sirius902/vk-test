@@ -25,11 +25,11 @@ set(SOURCE
     "${CIMGUI_DIR}/imgui/backends/imgui_impl_vulkan.cpp"
 )
 
+add_library(cimgui SHARED "${SOURCE}")
+
 if(WIN32)
-    add_library(cimgui SHARED "${SOURCE}")
     target_compile_definitions(cimgui PRIVATE "-DIMGUI_IMPL_API=extern \"C\" __declspec\(dllexport\)")
 else()
-    add_library(cimgui STATIC "${SOURCE}")
     target_compile_definitions(cimgui PRIVATE "-DIMGUI_IMPL_API=extern \"C\"")
 endif()
 

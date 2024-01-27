@@ -14,11 +14,6 @@ pub fn build(b: *std.Build) void {
 
     exe.linkLibC();
 
-    // cimgui is dynamically linked on Windows
-    if (target.result.os.tag != .windows) {
-        exe.linkLibCpp();
-    }
-
     linkGlfw(b, exe, target, optimize);
     linkVulkan(b, exe, target);
     linkShaders(b, exe);

@@ -1,3 +1,4 @@
+const std = @import("std");
 const c = @import("c.zig");
 const vk = @import("vulkan");
 
@@ -45,7 +46,7 @@ pub const ImGui_ImplVulkan_InitInfo = extern struct {
     subpass: u32,
     min_image_count: u32,
     image_count: u32,
-    msaa_samples: vk.SampleCountFlags = .{},
+    msaa_samples: vk.SampleCountFlags,
     use_dynamic_rendering: bool,
     color_attachment_format: vk.Format,
     allocator: ?*const vk.AllocationCallbacks = null,
