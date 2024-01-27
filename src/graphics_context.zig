@@ -224,7 +224,15 @@ pub const GraphicsContext = struct {
         _ = message_types;
         const self: *GraphicsContext = @alignCast(@ptrCast(user_data.?));
         _ = self;
-        log.debug("{s}", .{callback_data.?.p_message.?});
+
+        // TODO: Hack to compile for both Vulkan specs 1.3.275 and 1.3.276 until
+        // 1.3.276 is available to download on Windows.
+        const message = if (@typeInfo(@TypeOf(callback_data.?.p_message)) == .Optional)
+            callback_data.?.p_message.?
+        else
+            callback_data.?.p_message;
+
+        log.debug("{s}", .{message});
         return vk.FALSE;
     }
 };
