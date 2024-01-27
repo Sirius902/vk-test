@@ -82,7 +82,8 @@ fn linkGlfw(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.R
             "bin",
         });
 
-        _ = installSharedLibWindows(b, vcpkg_bin_path, glfw_name);
+        const install_lib = installSharedLibWindows(b, vcpkg_bin_path, glfw_name);
+        compile.step.dependOn(&install_lib.step);
     } else {
         compile.linkSystemLibrary("glfw");
     }
@@ -119,38 +120,51 @@ fn linkShaders(b: *std.Build, compile: *std.Build.Step.Compile) void {
     compile.root_module.addImport("shaders", shaders.getModule());
 }
 
+// TODO: I kinda hate this but it works
 fn linkImGui(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
     const cimgui_dir = "external/cimgui";
-    const cimgui_build_dir = b.pathJoin(&[_][]const u8{ cimgui_dir, "build" });
+    const cimgui_build_dir = b.pathJoin(&[_][]const u8{ b.cache_root.path orelse ".", "cimgui-build" });
 
-    const cmake_init = b.addSystemCommand(&[_][]const u8{
-        "cmake",
-        "-S",
-        cimgui_dir,
-        "-B",
-        cimgui_build_dir,
-        "-GNinja",
-        "-DCMAKE_C_COMPILER=zig;cc",
-        "-DCMAKE_CXX_COMPILER=zig;c++",
-    });
-
-    const cmake_build = b.addSystemCommand(&[_][]const u8{
-        "cmake",
-        "--build",
-        cimgui_build_dir,
-    });
-
-    cmake_build.step.dependOn(&cmake_init.step);
+    const cmake_build = b.addSystemCommand(&[_][]const u8{ "cmake", "--build", cimgui_build_dir });
     compile.step.dependOn(&cmake_build.step);
 
+    // Don't configure the cmake project if already configured
+    var cimgui_build_dir_handle = std.fs.cwd().openDir(cimgui_build_dir, .{});
+    if (cimgui_build_dir_handle) |*dir| {
+        dir.close();
+    } else |_| {
+        // TODO: Use build optimization level for lib
+        const cmake_init = b.addSystemCommand(&[_][]const u8{
+            "cmake",
+            "-S",
+            "cimgui",
+            "-B",
+            cimgui_build_dir,
+            "-GNinja",
+            "-DCMAKE_CXX_COMPILER=zig;c++",
+        });
+
+        if (target.result.os.tag == .windows) {
+            const vcpkg_root = std.process.getEnvVarOwned(b.allocator, "VCPKG_ROOT") catch |err|
+                std.debug.panic("Expected VCPKG_ROOT env to be found: {}", .{err});
+
+            const toolchain_file = b.pathJoin(&[_][]const u8{ vcpkg_root, "scripts", "buildsystems", "vcpkg.cmake" });
+            cmake_init.addArg(b.fmt("-DCMAKE_TOOLCHAIN_FILE={s}", .{toolchain_file}));
+        }
+
+        cmake_build.step.dependOn(&cmake_init.step);
+    }
+
     compile.addIncludePath(.{ .path = cimgui_dir });
+    compile.addIncludePath(.{ .path = b.pathJoin(&[_][]const u8{ cimgui_dir, "generator/output" }) });
     compile.addLibraryPath(.{ .path = cimgui_build_dir });
 
     if (target.result.os.tag == .windows) {
         compile.linkSystemLibrary("cimgui.dll");
 
-        const install_lib = installSharedLibWindows(b, cimgui_build_dir, "cimgui");
+        const install_lib = installSharedLibWindows(b, cimgui_build_dir, "libcimgui");
         install_lib.step.dependOn(&cmake_build.step);
+        compile.step.dependOn(&install_lib.step);
     } else {
         compile.linkSystemLibrary("cimgui");
     }
@@ -170,7 +184,7 @@ fn installSharedLibWindows(b: *std.Build, src_dir: []const u8, lib_name: []const
         pdb_file.close();
 
         const install_pdb = b.addInstallBinFile(.{ .path = pdb_path }, pdb_name);
-        install_pdb.step.dependOn(&install_dll.step);
+        install_dll.step.dependOn(&install_pdb.step);
     } else |_| {}
 
     return install_dll;

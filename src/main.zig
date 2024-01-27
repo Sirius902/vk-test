@@ -87,6 +87,9 @@ pub fn main() !void {
     const render_pass = try createRenderPass(gc, swapchain);
     defer gc.vkd.destroyRenderPass(gc.dev, render_pass, null);
 
+    try initImGui(gc, window, render_pass);
+    defer deinitImGui();
+
     const pipeline = try createPipeline(gc, pipeline_layout, render_pass);
     defer gc.vkd.destroyPipeline(gc.dev, pipeline, null);
 
@@ -486,4 +489,33 @@ fn createPipeline(
         @ptrCast(&pipeline),
     );
     return pipeline;
+}
+
+fn initImGui(gc: *const GraphicsContext, window: *c.GLFWwindow, render_pass: vk.RenderPass) !void {
+    _ = c.igCreateContext(null);
+
+    if (!c.ImGui_ImplGlfw_InitForVulkan(window, true)) return error.ImGuiImplInit;
+
+    _ = gc;
+    _ = render_pass;
+
+    // var init_info = c.ImGui_ImplVulkan_InitInfo{
+    //     .Instance = gc.instance,
+    //     .PhysicalDevice = gc.pdev,
+    //     .Device = gc.dev,
+    //     .QueueFamily = gc.graphics_queue.family,
+    //     .Queue = gc.graphics_queue.handle,
+    //     .PipelineCache = undefined,
+    //     .DescriptorPool = undefined,
+    //     .Subpass = 0,
+    //     .MinImageCount = undefined,
+    // };
+    //
+    // c.ImGui_ImplVulkan_Init(&init_info, render_pass);
+}
+
+fn deinitImGui() void {
+    // c.ImGui_ImplVulkan_Shutdown();
+    c.ImGui_ImplGlfw_Shutdown();
+    c.igDestroyContext(null);
 }
