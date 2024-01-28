@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
 
     exe.linkLibC();
 
-    linkGlfw(b, exe, target, optimize);
+    linkGlfw(b, exe, target);
     linkVulkan(b, exe, target);
     linkShaders(b, exe);
     linkImGui(b, exe, target, optimize);
@@ -44,12 +44,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_unit_tests.step);
 }
 
-fn linkGlfw(
-    b: *std.Build,
-    compile: *std.Build.Step.Compile,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) void {
+fn linkGlfw(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
     // Try to link libs using vcpkg on Windows
     if (target.result.os.tag == .windows) {
         const vcpkg_root = std.process.getEnvVarOwned(b.allocator, "VCPKG_ROOT") catch |err|
@@ -67,22 +62,8 @@ fn linkGlfw(
             std.mem.concat(b.allocator, u8, &[_][]const u8{ arch_str, "-windows" }) catch unreachable,
         });
 
-        const vcpkg_lib_path = if (optimize == .Debug)
-            b.pathJoin(&[_][]const u8{
-                vcpkg_installed_arch_path,
-                "debug",
-                "lib",
-            })
-        else
-            b.pathJoin(&[_][]const u8{
-                vcpkg_installed_arch_path,
-                "lib",
-            });
-
-        const vcpkg_include_path = b.pathJoin(&[_][]const u8{
-            vcpkg_installed_arch_path,
-            "include",
-        });
+        const vcpkg_lib_path = b.pathJoin(&[_][]const u8{ vcpkg_installed_arch_path, "lib" });
+        const vcpkg_include_path = b.pathJoin(&[_][]const u8{ vcpkg_installed_arch_path, "include" });
 
         const glfw_name = "glfw3";
 
@@ -90,17 +71,7 @@ fn linkGlfw(
         compile.addLibraryPath(.{ .path = vcpkg_lib_path });
         compile.linkSystemLibrary(glfw_name ++ "dll");
 
-        const vcpkg_bin_path = if (optimize == .Debug)
-            b.pathJoin(&[_][]const u8{
-                vcpkg_installed_arch_path,
-                "debug",
-                "bin",
-            })
-        else
-            b.pathJoin(&[_][]const u8{
-                vcpkg_installed_arch_path,
-                "bin",
-            });
+        const vcpkg_bin_path = b.pathJoin(&[_][]const u8{ vcpkg_installed_arch_path, "bin" });
 
         const install_lib = installSharedLibWindows(b, vcpkg_bin_path, glfw_name);
         compile.step.dependOn(&install_lib.step);
