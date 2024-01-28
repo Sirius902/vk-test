@@ -161,7 +161,7 @@ fn linkImGui(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.
         compile.addLibraryPath(.{ .path = b.pathJoin(&[_][]const u8{ vulkan_sdk_root, lib_dir_name }) });
         compile.linkSystemLibrary("vulkan-1");
     } else {
-        compile.linkSystemLibrary("libvulkan");
+        compile.linkSystemLibrary("vulkan");
     }
 }
 
