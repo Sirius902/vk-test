@@ -206,6 +206,13 @@ pub fn main() !void {
             graphics_outdated = false;
         }
 
+        // Update and Render additional Platform Windows
+        const io: *c.ImGuiIO = c.igGetIO();
+        if ((io.ConfigFlags & c.ImGuiConfigFlags_ViewportsEnable) != 0) {
+            c.igUpdatePlatformWindows();
+            c.igRenderPlatformWindowsDefault(null, null);
+        }
+
         c.glfwPollEvents();
     }
 
@@ -550,6 +557,17 @@ fn initImGui(
 
     const io: *c.ImGuiIO = c.igGetIO();
     io.IniFilename = ini_path;
+    io.ConfigFlags |= c.ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= c.ImGuiConfigFlags_NavEnableGamepad;
+    io.ConfigFlags |= c.ImGuiConfigFlags_DockingEnable;
+    // io.ConfigFlags |= c.ImGuiConfigFlags_ViewportsEnable;
+
+    // When viewports are enabled we tweak WindowRounding/WindowBg so platform windows can look identical to regular ones.
+    const style: *c.ImGuiStyle = c.igGetStyle();
+    if ((io.ConfigFlags & c.ImGuiConfigFlags_ViewportsEnable) != 0) {
+        style.WindowRounding = 0.0;
+        style.Colors[c.ImGuiCol_WindowBg].w = 1.0;
+    }
 
     c.igStyleColorsDark(null);
 
