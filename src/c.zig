@@ -16,5 +16,5 @@ pub extern fn glfwGetInstanceProcAddress(instance: vk.Instance, procname: [*:0]c
 pub extern fn glfwGetPhysicalDevicePresentationSupport(instance: vk.Instance, pdev: vk.PhysicalDevice, queuefamily: u32) c_int;
 pub extern fn glfwCreateWindowSurface(instance: vk.Instance, window: *c.GLFWwindow, allocation_callbacks: ?*const vk.AllocationCallbacks, surface: *vk.SurfaceKHR) vk.Result;
 
-// Same as above but for cimgui.
-pub usingnamespace @import("cimgui_impl_vulkan.zig");
+// Same as above but for ImGui Vulkan impl.
+pub usingnamespace @import("imgui_impl_vulkan.zig");

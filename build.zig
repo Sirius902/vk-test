@@ -13,11 +13,12 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.linkLibC();
+    exe.linkLibCpp();
 
     linkGlfw(b, exe, target);
     linkVulkan(b, exe, target);
     linkShaders(b, exe);
-    linkImGui(b, exe, target, optimize);
+    linkImGui(b, exe, target);
 
     b.installArtifact(exe);
 
@@ -81,18 +82,21 @@ fn linkGlfw(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.R
 }
 
 fn linkVulkan(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
-    const registry_path = if (target.result.os.tag == .windows) blk: {
-        const vulkan_sdk_root = std.process.getEnvVarOwned(b.allocator, "VULKAN_SDK") catch |err|
-            std.debug.panic("Expected VULKAN_SDK env to be found: {}", .{err});
+    const sdk_root_env = std.process.getEnvVarOwned(b.allocator, "VULKAN_SDK") catch null;
+    const share_parent_dir = if (sdk_root_env) |root|
+        root
+    else if (target.result.os.tag != .windows)
+        "/usr"
+    else
+        @panic("Failed to find Vulkan share directory. Please set the VULKAN_SDK environment variable.");
 
-        break :blk b.pathJoin(&[_][]const u8{
-            vulkan_sdk_root,
-            "share",
-            "vulkan",
-            "registry",
-            "vk.xml",
-        });
-    } else "/usr/share/vulkan/registry/vk.xml";
+    const registry_path = b.pathJoin(&[_][]const u8{
+        share_parent_dir,
+        "share",
+        "vulkan",
+        "registry",
+        "vk.xml",
+    });
 
     const vkzig = b.dependency("vulkan_zig", .{ .registry = @as([]const u8, registry_path) });
     const vkzig_bindings = vkzig.module("vulkan-zig");
@@ -111,59 +115,53 @@ fn linkShaders(b: *std.Build, compile: *std.Build.Step.Compile) void {
     compile.root_module.addImport("shaders", shaders.getModule());
 }
 
-// TODO: I kinda hate this but it works
-fn linkImGui(
-    b: *std.Build,
-    compile: *std.Build.Step.Compile,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) void {
+fn linkImGui(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
     const cimgui_dir = "external/cimgui";
-    const cimgui_build_dir = b.pathJoin(&[_][]const u8{ b.cache_root.path orelse ".", "cimgui-build" });
+    const cimgui_src = &[_][]const u8{
+        "cimgui.cpp",
+        "imgui/imgui.cpp",
+        "imgui/imgui_demo.cpp",
+        "imgui/imgui_draw.cpp",
+        "imgui/imgui_tables.cpp",
+        "imgui/imgui_widgets.cpp",
+        "imgui/backends/imgui_impl_glfw.cpp",
+        "imgui/backends/imgui_impl_vulkan.cpp",
+    };
+    const cxx_flags = &[_][]const u8{
+        "-std=c++20",
+        "-DIMGUI_IMPL_API=extern \"C\"",
+    };
 
-    const cmake_build = b.addSystemCommand(&[_][]const u8{ "cmake", "--build", cimgui_build_dir });
-    compile.step.dependOn(&cmake_build.step);
-
-    // TODO: Reconfigure if CLI args are different.
-    // Don't configure the cmake project if already configured.
-    var cimgui_build_dir_handle = std.fs.cwd().openDir(cimgui_build_dir, .{});
-    if (cimgui_build_dir_handle) |*dir| {
-        dir.close();
-    } else |_| {
-        const cmake_init = b.addSystemCommand(&[_][]const u8{
-            "cmake",
-            "-S",
-            "cimgui",
-            "-B",
-            cimgui_build_dir,
-            "-GNinja",
-            "-DCMAKE_CXX_COMPILER=zig;c++",
-            b.fmt("-DCMAKE_BUILD_TYPE={s}", .{if (optimize == .Debug) "Debug" else "Release"}),
+    for (cimgui_src) |src_file| {
+        compile.addCSourceFile(.{
+            .file = .{ .path = b.pathJoin(&[_][]const u8{ cimgui_dir, src_file }) },
+            .flags = cxx_flags,
         });
-
-        if (target.result.os.tag == .windows) {
-            const vcpkg_root = std.process.getEnvVarOwned(b.allocator, "VCPKG_ROOT") catch |err|
-                std.debug.panic("Expected VCPKG_ROOT env to be found: {}", .{err});
-
-            const toolchain_file = b.pathJoin(&[_][]const u8{ vcpkg_root, "scripts", "buildsystems", "vcpkg.cmake" });
-            cmake_init.addArg(b.fmt("-DCMAKE_TOOLCHAIN_FILE={s}", .{toolchain_file}));
-        }
-
-        cmake_build.step.dependOn(&cmake_init.step);
     }
 
     compile.addIncludePath(.{ .path = cimgui_dir });
-    compile.addIncludePath(.{ .path = b.pathJoin(&[_][]const u8{ cimgui_dir, "generator/output" }) });
-    compile.addLibraryPath(.{ .path = cimgui_build_dir });
+    compile.addIncludePath(.{ .path = b.pathJoin(&[_][]const u8{ cimgui_dir, "generator", "output" }) });
+    compile.addIncludePath(.{ .path = b.pathJoin(&[_][]const u8{ cimgui_dir, "imgui" }) });
 
+    // Link system Vulkan lib for the ImGui Vulkan impl to use.
     if (target.result.os.tag == .windows) {
-        compile.linkSystemLibrary("cimgui.dll");
+        const vulkan_sdk_root = std.process.getEnvVarOwned(b.allocator, "VULKAN_SDK") catch |err| {
+            std.debug.panic("Expected VULKAN_SDK env to be found, but got: {}", .{err});
+        };
 
-        const install_lib = installSharedLibWindows(b, cimgui_build_dir, "libcimgui");
-        install_lib.step.dependOn(&cmake_build.step);
-        compile.step.dependOn(&install_lib.step);
+        const arch_suffix = switch (target.result.cpu.arch) {
+            .x86 => "32",
+            .x86_64 => "",
+            else => std.debug.panic("Expected x86 CPU architecture, but got: {}", .{target.result.cpu.arch}),
+        };
+
+        const lib_dir_name = std.mem.concat(b.allocator, u8, &[_][]const u8{ "Lib", arch_suffix }) catch @panic("OOM");
+
+        compile.addIncludePath(.{ .path = b.pathJoin(&[_][]const u8{ vulkan_sdk_root, "Include" }) });
+        compile.addLibraryPath(.{ .path = b.pathJoin(&[_][]const u8{ vulkan_sdk_root, lib_dir_name }) });
+        compile.linkSystemLibrary("vulkan-1");
     } else {
-        compile.linkSystemLibrary("cimgui");
+        compile.linkSystemLibrary("libvulkan");
     }
 }
 
