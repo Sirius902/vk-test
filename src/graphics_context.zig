@@ -92,6 +92,19 @@ const DeviceDispatch = vk.DeviceWrapper(.{
     .createDescriptorPool = true,
     .destroyDescriptorPool = true,
     .resetCommandBuffer = true,
+    .createImage = true,
+    .destroyImage = true,
+    .createDescriptorSetLayout = true,
+    .destroyDescriptorSetLayout = true,
+    .allocateDescriptorSets = true,
+    .freeDescriptorSets = true,
+    .updateDescriptorSets = true,
+    .createSampler = true,
+    .destroySampler = true,
+    .cmdBindDescriptorSets = true,
+    .getImageMemoryRequirements = true,
+    .bindImageMemory = true,
+    .cmdPipelineBarrier = true,
 });
 
 pub const GraphicsContext = struct {

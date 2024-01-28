@@ -4,6 +4,7 @@ const c = @import("c.zig");
 const shaders = @import("shaders");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const Swapchain = @import("swapchain.zig").Swapchain;
+const ImGuiContext = @import("imgui_context.zig").ImGuiContext;
 const Allocator = std.mem.Allocator;
 
 const app_name = "Vulkan Test";
@@ -35,9 +36,9 @@ const Vertex = struct {
 };
 
 const vertices = [_]Vertex{
-    .{ .pos = .{ 0, -0.5 }, .color = .{ 1, 0, 0 } },
-    .{ .pos = .{ 0.5, 0.5 }, .color = .{ 0, 1, 0 } },
     .{ .pos = .{ -0.5, 0.5 }, .color = .{ 0, 0, 1 } },
+    .{ .pos = .{ 0.5, 0.5 }, .color = .{ 0, 1, 0 } },
+    .{ .pos = .{ 0, -0.5 }, .color = .{ 1, 0, 0 } },
 };
 
 var is_demo_open = true;
@@ -104,10 +105,6 @@ pub fn main() !void {
     };
     defer allocator.free(imgui_ini_path);
 
-    const descriptor_pool = try initImGui(gc, &swapchain, render_pass, window, imgui_ini_path);
-    defer gc.vkd.destroyDescriptorPool(gc.dev, descriptor_pool, null);
-    defer deinitImGui();
-
     const pipeline = try createPipeline(gc, pipeline_layout, render_pass);
     defer gc.vkd.destroyPipeline(gc.dev, pipeline, null);
 
@@ -119,6 +116,9 @@ pub fn main() !void {
         .flags = .{ .reset_command_buffer_bit = true },
     }, null);
     defer gc.vkd.destroyCommandPool(gc.dev, pool, null);
+
+    var ic = try ImGuiContext.init(gc, render_pass, extent, pool, window, imgui_ini_path);
+    defer ic.deinit();
 
     const buffer = try gc.vkd.createBuffer(gc.dev, &.{
         .size = @sizeOf(@TypeOf(vertices)),
@@ -152,9 +152,7 @@ pub fn main() !void {
             continue;
         }
 
-        c.ImGui_ImplVulkan_NewFrame();
-        c.ImGui_ImplGlfw_NewFrame();
-        c.igNewFrame();
+        ic.newFrame();
 
         if (is_demo_open) c.igShowDemoWindow(&is_demo_open);
         if (is_config_open) {
@@ -167,13 +165,15 @@ pub fn main() !void {
             }
         }
 
-        c.igRender();
+        ic.render();
+        try ic.renderDrawDataToTexture();
 
         const cmdbuf = cmdbufs[swapchain.image_index];
 
         const current_image = try swapchain.acquireImage();
         try recordCommandBuffer(
             gc,
+            &ic,
             buffer,
             swapchain.extent,
             render_pass,
@@ -203,16 +203,12 @@ pub fn main() !void {
                 framebuffers,
             );
 
+            try ic.resize(extent);
+
             graphics_outdated = false;
         }
 
-        // Update and Render additional Platform Windows
-        const io: *c.ImGuiIO = c.igGetIO();
-        if ((io.ConfigFlags & c.ImGuiConfigFlags_ViewportsEnable) != 0) {
-            c.igUpdatePlatformWindows();
-            c.igRenderPlatformWindowsDefault(null, null);
-        }
-
+        ic.postPresent();
         c.glfwPollEvents();
     }
 
@@ -304,6 +300,7 @@ fn destroyCommandBuffers(gc: *const GraphicsContext, pool: vk.CommandPool, alloc
 
 fn recordCommandBuffer(
     gc: *const GraphicsContext,
+    ic: *const ImGuiContext,
     buffer: vk.Buffer,
     extent: vk.Extent2D,
     render_pass: vk.RenderPass,
@@ -354,7 +351,7 @@ fn recordCommandBuffer(
     gc.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, @ptrCast(&buffer), &offset);
     gc.vkd.cmdDraw(cmdbuf, vertices.len, 1, 0, 0);
 
-    c.ImGui_ImplVulkan_RenderDrawData(c.igGetDrawData(), cmdbuf, .null_handle);
+    ic.drawTexture(cmdbuf);
 
     gc.vkd.cmdEndRenderPass(cmdbuf);
     try gc.vkd.endCommandBuffer(cmdbuf);
@@ -472,7 +469,7 @@ fn createPipeline(
         .rasterizer_discard_enable = vk.FALSE,
         .polygon_mode = .fill,
         .cull_mode = .{ .back_bit = true },
-        .front_face = .clockwise,
+        .front_face = .counter_clockwise,
         .depth_bias_enable = vk.FALSE,
         .depth_bias_constant_factor = 0,
         .depth_bias_clamp = 0,
@@ -516,7 +513,7 @@ fn createPipeline(
 
     const gpci = vk.GraphicsPipelineCreateInfo{
         .flags = .{},
-        .stage_count = 2,
+        .stage_count = @intCast(pssci.len),
         .p_stages = &pssci,
         .p_vertex_input_state = &pvisci,
         .p_input_assembly_state = &piasci,
@@ -544,79 +541,4 @@ fn createPipeline(
         @ptrCast(&pipeline),
     );
     return pipeline;
-}
-
-fn initImGui(
-    gc: *const GraphicsContext,
-    swapchain: *const Swapchain,
-    render_pass: vk.RenderPass,
-    window: *c.GLFWwindow,
-    ini_path: [*:0]const u8,
-) !vk.DescriptorPool {
-    _ = c.igCreateContext(null);
-
-    const io: *c.ImGuiIO = c.igGetIO();
-    io.IniFilename = ini_path;
-    io.ConfigFlags |= c.ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= c.ImGuiConfigFlags_NavEnableGamepad;
-    io.ConfigFlags |= c.ImGuiConfigFlags_DockingEnable;
-    // io.ConfigFlags |= c.ImGuiConfigFlags_ViewportsEnable;
-
-    // When viewports are enabled we tweak WindowRounding/WindowBg so platform windows can look identical to regular ones.
-    const style: *c.ImGuiStyle = c.igGetStyle();
-    if ((io.ConfigFlags & c.ImGuiConfigFlags_ViewportsEnable) != 0) {
-        style.WindowRounding = 0.0;
-        style.Colors[c.ImGuiCol_WindowBg].w = 1.0;
-    }
-
-    c.igStyleColorsDark(null);
-
-    if (!c.ImGui_ImplGlfw_InitForVulkan(window, true)) return error.ImGuiGlfwInit;
-
-    const pool_sizes = [_]vk.DescriptorPoolSize{
-        .{ .type = .sampler, .descriptor_count = 1000 },
-        .{ .type = .combined_image_sampler, .descriptor_count = 1000 },
-        .{ .type = .sampled_image, .descriptor_count = 1000 },
-        .{ .type = .storage_image, .descriptor_count = 1000 },
-        .{ .type = .uniform_texel_buffer, .descriptor_count = 1000 },
-        .{ .type = .storage_texel_buffer, .descriptor_count = 1000 },
-        .{ .type = .uniform_buffer, .descriptor_count = 1000 },
-        .{ .type = .storage_buffer, .descriptor_count = 1000 },
-        .{ .type = .uniform_buffer_dynamic, .descriptor_count = 1000 },
-        .{ .type = .storage_buffer_dynamic, .descriptor_count = 1000 },
-        .{ .type = .input_attachment, .descriptor_count = 1000 },
-    };
-
-    const descriptor_pool = try gc.vkd.createDescriptorPool(gc.dev, &.{
-        .flags = .{ .free_descriptor_set_bit = true },
-        .max_sets = 1000 * pool_sizes.len,
-        .pool_size_count = @intCast(pool_sizes.len),
-        .p_pool_sizes = &pool_sizes,
-    }, null);
-
-    var init_info = c.ImGui_ImplVulkan_InitInfo{
-        .instance = gc.instance,
-        .physical_device = gc.pdev,
-        .device = gc.dev,
-        .queue_family = gc.graphics_queue.family,
-        .queue = gc.graphics_queue.handle,
-        .pipeline_cache = .null_handle,
-        .descriptor_pool = descriptor_pool,
-        .subpass = 0,
-        .min_image_count = 2,
-        .image_count = @intCast(swapchain.swap_images.len),
-        .msaa_samples = .{ .@"1_bit" = true },
-        .use_dynamic_rendering = false,
-        .color_attachment_format = swapchain.surface_format.format,
-        .min_allocation_size = 0,
-    };
-    if (!c.ImGui_ImplVulkan_Init(&init_info, render_pass)) return error.ImGuiVulkanInit;
-
-    return descriptor_pool;
-}
-
-fn deinitImGui() void {
-    c.ImGui_ImplVulkan_Shutdown();
-    c.ImGui_ImplGlfw_Shutdown();
-    c.igDestroyContext(null);
 }
