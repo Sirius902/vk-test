@@ -36,7 +36,7 @@ pub const ImGuiContext = struct {
         io.ConfigFlags |= c.ImGuiConfigFlags_NavEnableKeyboard;
         io.ConfigFlags |= c.ImGuiConfigFlags_NavEnableGamepad;
         io.ConfigFlags |= c.ImGuiConfigFlags_DockingEnable;
-        io.ConfigFlags |= c.ImGuiConfigFlags_ViewportsEnable;
+        // io.ConfigFlags |= c.ImGuiConfigFlags_ViewportsEnable;
 
         // When viewports are enabled we tweak WindowRounding/WindowBg so platform windows can look identical to regular ones.
         const style: *c.ImGuiStyle = c.igGetStyle();
