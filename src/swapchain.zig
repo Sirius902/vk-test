@@ -8,6 +8,7 @@ pub const Swapchain = struct {
     allocator: Allocator,
 
     surface_format: vk.SurfaceFormatKHR,
+    surface_unorm_format: vk.Format,
     present_mode: vk.PresentModeKHR,
     extent: vk.Extent2D,
     handle: vk.SwapchainKHR,
@@ -38,7 +39,10 @@ pub const Swapchain = struct {
             return error.InvalidSurfaceDimensions;
         }
 
-        const surface_format = try findSurfaceFormat(gc, allocator);
+        const formats = try findSurfaceFormats(gc, allocator);
+        const surface_format = formats.surface_format;
+        const surface_unorm_format = formats.surface_unorm_format;
+
         const present_mode = if (wait_for_vsync) .fifo_khr else try findPresentMode(gc, allocator);
 
         var image_count = caps.min_image_count + 1;
@@ -52,7 +56,15 @@ pub const Swapchain = struct {
         else
             .exclusive;
 
+        const view_formats = [_]vk.Format{ surface_format.format, .b8g8r8a8_unorm };
+        const image_format_list = vk.ImageFormatListCreateInfo{
+            .p_view_formats = &view_formats,
+            .view_format_count = view_formats.len,
+        };
+
         const handle = try gc.vkd.createSwapchainKHR(gc.dev, &.{
+            .flags = .{ .mutable_format_bit_khr = true },
+            .p_next = &image_format_list,
             .surface = gc.surface,
             .min_image_count = image_count,
             .image_format = surface_format.format,
@@ -76,7 +88,7 @@ pub const Swapchain = struct {
             gc.vkd.destroySwapchainKHR(gc.dev, old_handle, null);
         }
 
-        const swap_images = try initSwapchainImages(gc, handle, surface_format.format, allocator);
+        const swap_images = try initSwapchainImages(gc, handle, surface_format.format, surface_unorm_format, allocator);
         errdefer {
             for (swap_images) |si| si.deinit(gc);
             allocator.free(swap_images);
@@ -95,6 +107,7 @@ pub const Swapchain = struct {
             .gc = gc,
             .allocator = allocator,
             .surface_format = surface_format,
+            .surface_unorm_format = surface_unorm_format,
             .present_mode = present_mode,
             .extent = actual_extent,
             .handle = handle,
@@ -205,11 +218,12 @@ pub const Swapchain = struct {
 const SwapImage = struct {
     image: vk.Image,
     view: vk.ImageView,
+    unorm_view: vk.ImageView,
     image_acquired: vk.Semaphore,
     render_finished: vk.Semaphore,
     frame_fence: vk.Fence,
 
-    fn init(gc: *const GraphicsContext, image: vk.Image, format: vk.Format) !SwapImage {
+    fn init(gc: *const GraphicsContext, image: vk.Image, format: vk.Format, unorm_format: vk.Format) !SwapImage {
         const view = try gc.vkd.createImageView(gc.dev, &.{
             .image = image,
             .view_type = .@"2d",
@@ -225,6 +239,21 @@ const SwapImage = struct {
         }, null);
         errdefer gc.vkd.destroyImageView(gc.dev, view, null);
 
+        const unorm_view = try gc.vkd.createImageView(gc.dev, &.{
+            .image = image,
+            .view_type = .@"2d",
+            .format = unorm_format,
+            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+            .subresource_range = .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        }, null);
+        errdefer gc.vkd.destroyImageView(gc.dev, unorm_view, null);
+
         const image_acquired = try gc.vkd.createSemaphore(gc.dev, &.{}, null);
         errdefer gc.vkd.destroySemaphore(gc.dev, image_acquired, null);
 
@@ -237,6 +266,7 @@ const SwapImage = struct {
         return SwapImage{
             .image = image,
             .view = view,
+            .unorm_view = unorm_view,
             .image_acquired = image_acquired,
             .render_finished = render_finished,
             .frame_fence = frame_fence,
@@ -245,6 +275,7 @@ const SwapImage = struct {
 
     fn deinit(self: SwapImage, gc: *const GraphicsContext) void {
         self.waitForFence(gc) catch return;
+        gc.vkd.destroyImageView(gc.dev, self.unorm_view, null);
         gc.vkd.destroyImageView(gc.dev, self.view, null);
         gc.vkd.destroySemaphore(gc.dev, self.image_acquired, null);
         gc.vkd.destroySemaphore(gc.dev, self.render_finished, null);
@@ -256,7 +287,13 @@ const SwapImage = struct {
     }
 };
 
-fn initSwapchainImages(gc: *const GraphicsContext, swapchain: vk.SwapchainKHR, format: vk.Format, allocator: Allocator) ![]SwapImage {
+fn initSwapchainImages(
+    gc: *const GraphicsContext,
+    swapchain: vk.SwapchainKHR,
+    format: vk.Format,
+    unorm_format: vk.Format,
+    allocator: Allocator,
+) ![]SwapImage {
     var count: u32 = undefined;
     _ = try gc.vkd.getSwapchainImagesKHR(gc.dev, swapchain, &count, null);
     const images = try allocator.alloc(vk.Image, count);
@@ -270,16 +307,24 @@ fn initSwapchainImages(gc: *const GraphicsContext, swapchain: vk.SwapchainKHR, f
     errdefer for (swap_images[0..i]) |si| si.deinit(gc);
 
     for (images) |image| {
-        swap_images[i] = try SwapImage.init(gc, image, format);
+        swap_images[i] = try SwapImage.init(gc, image, format, unorm_format);
         i += 1;
     }
 
     return swap_images;
 }
 
-fn findSurfaceFormat(gc: *const GraphicsContext, allocator: Allocator) !vk.SurfaceFormatKHR {
+fn findSurfaceFormats(gc: *const GraphicsContext, allocator: Allocator) !struct {
+    surface_format: vk.SurfaceFormatKHR,
+    surface_unorm_format: vk.Format,
+} {
     const preferred = vk.SurfaceFormatKHR{
         .format = .b8g8r8a8_srgb,
+        .color_space = .srgb_nonlinear_khr,
+    };
+
+    const preferred_unorm = vk.SurfaceFormatKHR{
+        .format = .b8g8r8a8_unorm,
         .color_space = .srgb_nonlinear_khr,
     };
 
@@ -289,13 +334,31 @@ fn findSurfaceFormat(gc: *const GraphicsContext, allocator: Allocator) !vk.Surfa
     defer allocator.free(surface_formats);
     _ = try gc.vki.getPhysicalDeviceSurfaceFormatsKHR(gc.pdev, gc.surface, &count, surface_formats.ptr);
 
-    for (surface_formats) |sfmt| {
-        if (std.meta.eql(sfmt, preferred)) {
-            return preferred;
+    var surface_format: ?vk.SurfaceFormatKHR = null;
+    var surface_unorm_format: ?vk.SurfaceFormatKHR = null;
+
+    for (surface_formats) |sfmt_choice| {
+        if (surface_format == null and std.meta.eql(sfmt_choice, preferred)) {
+            surface_format = sfmt_choice;
+        } else if (surface_unorm_format == null and std.meta.eql(sfmt_choice, preferred_unorm)) {
+            surface_unorm_format = sfmt_choice;
+        }
+
+        if (surface_format) |sfmt| {
+            if (surface_unorm_format) |sufmt| {
+                return .{
+                    .surface_format = sfmt,
+                    .surface_unorm_format = sufmt.format,
+                };
+            }
         }
     }
 
-    return surface_formats[0]; // There must always be at least one supported surface format
+    // There must always be at least one supported surface format
+    return .{
+        .surface_format = surface_formats[0],
+        .surface_unorm_format = surface_formats[0].format,
+    };
 }
 
 fn findPresentMode(gc: *const GraphicsContext, allocator: Allocator) !vk.PresentModeKHR {

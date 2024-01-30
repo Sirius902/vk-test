@@ -13,7 +13,11 @@ const debug_layers: ?[]const [*:0]const u8 = if (debug_enabled)
 else
     null;
 
-const required_device_extensions = [_][*:0]const u8{vk.extension_info.khr_swapchain.name};
+const required_device_extensions = [_][*:0]const u8{
+    vk.extension_info.khr_swapchain.name,
+    // Used to allow ImGui to write to a unorm view of the swap image. See https://github.com/ocornut/imgui/issues/6583.
+    vk.extension_info.khr_swapchain_mutable_format.name,
+};
 
 const BaseDispatch = vk.BaseWrapper(.{
     .createInstance = true,

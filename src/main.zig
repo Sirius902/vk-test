@@ -117,7 +117,7 @@ pub fn main() !void {
     }, null);
     defer gc.vkd.destroyCommandPool(gc.dev, pool, null);
 
-    var ic = try ImGuiContext.init(gc, render_pass, extent, pool, window, imgui_ini_path);
+    var ic = try ImGuiContext.init(gc, &swapchain, allocator, window, imgui_ini_path);
     defer ic.deinit();
 
     const buffer = try gc.vkd.createBuffer(gc.dev, &.{
@@ -166,7 +166,6 @@ pub fn main() !void {
         }
 
         ic.render();
-        try ic.renderDrawDataToTexture();
 
         const cmdbuf = cmdbufs[swapchain.image_index];
 
@@ -180,6 +179,7 @@ pub fn main() !void {
             pipeline,
             cmdbuf,
             framebuffers[swapchain.image_index],
+            ic.framebuffers[swapchain.image_index],
         );
 
         const state = swapchain.present(cmdbuf, current_image) catch |err| switch (err) {
@@ -203,7 +203,7 @@ pub fn main() !void {
                 framebuffers,
             );
 
-            try ic.resize(extent);
+            try ic.resize(&swapchain);
 
             graphics_outdated = false;
         }
@@ -307,6 +307,7 @@ fn recordCommandBuffer(
     pipeline: vk.Pipeline,
     cmdbuf: vk.CommandBuffer,
     framebuffer: vk.Framebuffer,
+    imgui_framebuffer: vk.Framebuffer,
 ) !void {
     const clear = vk.ClearValue{
         .color = .{ .float_32 = .{ 0, 0, 0, 1 } },
@@ -351,9 +352,10 @@ fn recordCommandBuffer(
     gc.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, @ptrCast(&buffer), &offset);
     gc.vkd.cmdDraw(cmdbuf, vertices.len, 1, 0, 0);
 
-    ic.drawTexture(cmdbuf);
-
     gc.vkd.cmdEndRenderPass(cmdbuf);
+
+    try ic.renderPass(imgui_framebuffer, cmdbuf);
+
     try gc.vkd.endCommandBuffer(cmdbuf);
 }
 
