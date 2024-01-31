@@ -3,28 +3,28 @@ const c = @import("c.zig");
 const vk = @import("vulkan");
 const shaders = @import("shaders");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
+const Swapchain = @import("swapchain.zig").Swapchain;
+const Allocator = std.mem.Allocator;
 
 /// Wraps ImGui setup. Only initialize one `ImGuiContext` at a time.
 pub const ImGuiContext = struct {
     gc: *const GraphicsContext,
+    allocator: Allocator,
     render_pass: vk.RenderPass,
     imgui_render_pass: vk.RenderPass,
     pipeline_layout: vk.PipelineLayout,
     pipeline: vk.Pipeline,
-    xfb: ExternalFramebuffer,
     descriptor_layout: vk.DescriptorSetLayout,
-    descriptor_set: vk.DescriptorSet,
     descriptor_pool: vk.DescriptorPool,
-    pool: vk.CommandPool,
-    cmdbuf: vk.CommandBuffer,
-
-    const format: vk.Format = .b8g8r8a8_srgb;
+    xfbs: []ExternalFramebuffer,
+    descriptor_sets: []const vk.DescriptorSet,
+    current_frame: u32,
 
     pub fn init(
         gc: *const GraphicsContext,
+        swapchain: *const Swapchain,
+        allocator: Allocator,
         render_pass: vk.RenderPass,
-        extent: vk.Extent2D,
-        pool: vk.CommandPool,
         window: *c.GLFWwindow,
         ini_path: [*:0]const u8,
     ) !ImGuiContext {
@@ -50,16 +50,8 @@ pub const ImGuiContext = struct {
         if (!c.ImGui_ImplGlfw_InitForVulkan(window, true)) return error.ImGuiGlfwInit;
         errdefer c.ImGui_ImplGlfw_Shutdown();
 
-        const imgui_render_pass = try createRenderPass(gc, format);
+        const imgui_render_pass = try createRenderPass(gc, swapchain.surface_format.format);
         errdefer gc.vkd.destroyRenderPass(gc.dev, imgui_render_pass, null);
-
-        var cmdbuf: vk.CommandBuffer = undefined;
-        try gc.vkd.allocateCommandBuffers(gc.dev, &.{
-            .command_pool = pool,
-            .level = .primary,
-            .command_buffer_count = 1,
-        }, @ptrCast(&cmdbuf));
-        errdefer gc.vkd.freeCommandBuffers(gc.dev, pool, 1, @ptrCast(&cmdbuf));
 
         const pool_sizes = [_]vk.DescriptorPoolSize{
             .{ .type = .sampler, .descriptor_count = 1000 },
@@ -93,10 +85,10 @@ pub const ImGuiContext = struct {
             .descriptor_pool = descriptor_pool,
             .subpass = 0,
             .min_image_count = 2,
-            .image_count = 2,
+            .image_count = @intCast(swapchain.swap_images.len),
             .msaa_samples = .{ .@"1_bit" = true },
             .use_dynamic_rendering = false,
-            .color_attachment_format = format,
+            .color_attachment_format = swapchain.surface_format.format,
             .min_allocation_size = 0,
         };
         if (!c.ImGui_ImplVulkan_Init(&init_info, imgui_render_pass)) return error.ImGuiVulkanInit;
@@ -115,14 +107,6 @@ pub const ImGuiContext = struct {
         }, null);
         errdefer gc.vkd.destroyDescriptorSetLayout(gc.dev, descriptor_layout, null);
 
-        var descriptor_set: vk.DescriptorSet = undefined;
-        try gc.vkd.allocateDescriptorSets(gc.dev, &vk.DescriptorSetAllocateInfo{
-            .descriptor_pool = descriptor_pool,
-            .descriptor_set_count = 1,
-            .p_set_layouts = @ptrCast(&descriptor_layout),
-        }, @ptrCast(&descriptor_set));
-        errdefer gc.vkd.freeDescriptorSets(gc.dev, descriptor_pool, 1, @ptrCast(&descriptor_set)) catch {};
-
         const pipeline_layout = try gc.vkd.createPipelineLayout(gc.dev, &.{
             .flags = .{},
             .set_layout_count = 1,
@@ -135,30 +119,62 @@ pub const ImGuiContext = struct {
         const pipeline = try createPipeline(gc, pipeline_layout, render_pass);
         errdefer gc.vkd.destroyPipeline(gc.dev, pipeline, null);
 
-        const xfb = try ExternalFramebuffer.init(gc, imgui_render_pass, format, extent, pool, descriptor_set);
-        errdefer xfb.deinit(gc);
+        const descriptor_sets = try allocator.alloc(vk.DescriptorSet, swapchain.swap_images.len);
+        errdefer allocator.free(descriptor_sets);
+
+        const layouts = try allocator.alloc(vk.DescriptorSetLayout, descriptor_sets.len);
+        defer allocator.free(layouts);
+        @memset(layouts, descriptor_layout);
+
+        try gc.vkd.allocateDescriptorSets(gc.dev, &vk.DescriptorSetAllocateInfo{
+            .descriptor_pool = descriptor_pool,
+            .descriptor_set_count = @intCast(descriptor_sets.len),
+            .p_set_layouts = layouts.ptr,
+        }, descriptor_sets.ptr);
+        errdefer gc.vkd.freeDescriptorSets(gc.dev, descriptor_pool, @intCast(descriptor_sets.len), descriptor_sets.ptr) catch {};
+
+        const xfbs = try allocator.alloc(ExternalFramebuffer, swapchain.swap_images.len);
+        errdefer allocator.free(xfbs);
+
+        var i: usize = 0;
+        errdefer for (xfbs[0..i]) |xfb| xfb.deinit(gc);
+
+        for (xfbs, descriptor_sets) |*xfb, set| {
+            xfb.* = try ExternalFramebuffer.init(
+                gc,
+                imgui_render_pass,
+                swapchain.surface_format.format,
+                swapchain.extent,
+                set,
+            );
+            i += 1;
+        }
 
         return .{
             .gc = gc,
+            .allocator = allocator,
             .render_pass = render_pass,
             .imgui_render_pass = imgui_render_pass,
             .pipeline_layout = pipeline_layout,
             .pipeline = pipeline,
-            .xfb = xfb,
             .descriptor_layout = descriptor_layout,
-            .descriptor_set = descriptor_set,
             .descriptor_pool = descriptor_pool,
-            .pool = pool,
-            .cmdbuf = cmdbuf,
+            .xfbs = xfbs,
+            .descriptor_sets = descriptor_sets,
+            .current_frame = 0,
         };
     }
 
     pub fn deinit(self: *const ImGuiContext) void {
-        self.gc.vkd.freeDescriptorSets(self.gc.dev, self.descriptor_pool, 1, @ptrCast(&self.descriptor_set)) catch {};
-        self.gc.vkd.destroyDescriptorSetLayout(self.gc.dev, self.descriptor_layout, null);
-        self.xfb.deinit(self.gc);
+        for (self.xfbs) |xfb| xfb.deinit(self.gc);
+        self.allocator.free(self.xfbs);
+
+        self.gc.vkd.freeDescriptorSets(self.gc.dev, self.descriptor_pool, @intCast(self.descriptor_sets.len), self.descriptor_sets.ptr) catch {};
+        self.allocator.free(self.descriptor_sets);
+
         self.gc.vkd.destroyPipeline(self.gc.dev, self.pipeline, null);
         self.gc.vkd.destroyPipelineLayout(self.gc.dev, self.pipeline_layout, null);
+        self.gc.vkd.destroyDescriptorSetLayout(self.gc.dev, self.descriptor_layout, null);
         self.gc.vkd.destroyRenderPass(self.gc.dev, self.imgui_render_pass, null);
 
         c.ImGui_ImplVulkan_Shutdown();
@@ -179,67 +195,43 @@ pub const ImGuiContext = struct {
         c.igRender();
     }
 
-    pub fn renderDrawDataToTexture(self: *const ImGuiContext) !void {
+    pub fn renderDrawDataToTexture(self: *const ImGuiContext, cmdbuf: vk.CommandBuffer) !void {
+        const current = &self.xfbs[self.current_frame];
+
         const clear = vk.ClearValue{
             .color = .{ .float_32 = .{ 0, 0, 0, 0 } },
         };
 
-        const viewport = vk.Viewport{
-            .x = 0,
-            .y = 0,
-            .width = @as(f32, @floatFromInt(self.xfb.extent.width)),
-            .height = @as(f32, @floatFromInt(self.xfb.extent.height)),
-            .min_depth = 0,
-            .max_depth = 1,
-        };
-
-        const scissor = vk.Rect2D{
-            .offset = .{ .x = 0, .y = 0 },
-            .extent = self.xfb.extent,
-        };
-
-        try self.gc.vkd.resetCommandBuffer(self.cmdbuf, .{});
-        try self.gc.vkd.beginCommandBuffer(self.cmdbuf, &.{});
-
-        self.gc.vkd.cmdSetViewport(self.cmdbuf, 0, 1, @ptrCast(&viewport));
-        self.gc.vkd.cmdSetScissor(self.cmdbuf, 0, 1, @ptrCast(&scissor));
-
         // This needs to be a separate definition - see https://github.com/ziglang/zig/issues/7627.
         const render_area = vk.Rect2D{
             .offset = .{ .x = 0, .y = 0 },
-            .extent = self.xfb.extent,
+            .extent = current.extent,
         };
 
-        self.gc.vkd.cmdBeginRenderPass(self.cmdbuf, &.{
+        self.gc.vkd.cmdBeginRenderPass(cmdbuf, &.{
             .render_pass = self.imgui_render_pass,
-            .framebuffer = self.xfb.framebuffer,
+            .framebuffer = current.framebuffer,
             .render_area = render_area,
             .clear_value_count = 1,
-            .p_clear_values = @as([*]const vk.ClearValue, @ptrCast(&clear)),
+            .p_clear_values = @ptrCast(&clear),
         }, .@"inline");
 
-        c.ImGui_ImplVulkan_RenderDrawData(c.igGetDrawData(), self.cmdbuf, .null_handle);
+        c.ImGui_ImplVulkan_RenderDrawData(c.igGetDrawData(), cmdbuf, .null_handle);
 
-        self.gc.vkd.cmdEndRenderPass(self.cmdbuf);
-        try self.gc.vkd.endCommandBuffer(self.cmdbuf);
-
-        const si = vk.SubmitInfo{
-            .command_buffer_count = 1,
-            .p_command_buffers = @ptrCast(&self.cmdbuf),
-            .p_wait_dst_stage_mask = undefined,
-        };
-        try self.gc.vkd.queueSubmit(self.gc.graphics_queue.handle, 1, @ptrCast(&si), .null_handle);
-        try self.gc.vkd.queueWaitIdle(self.gc.graphics_queue.handle);
+        self.gc.vkd.cmdEndRenderPass(cmdbuf);
     }
 
     pub fn drawTexture(self: *const ImGuiContext, cmdbuf: vk.CommandBuffer) void {
-        self.gc.vkd.cmdBindDescriptorSets(cmdbuf, .graphics, self.pipeline_layout, 0, 1, @ptrCast(&self.descriptor_set), 0, null);
+        const current_set = &self.descriptor_sets[self.current_frame];
+
+        self.gc.vkd.cmdBindDescriptorSets(cmdbuf, .graphics, self.pipeline_layout, 0, 1, @ptrCast(current_set), 0, null);
         self.gc.vkd.cmdBindPipeline(cmdbuf, .graphics, self.pipeline);
         self.gc.vkd.cmdDraw(cmdbuf, 6, 1, 0, 0);
     }
 
-    pub fn postPresent(self: *const ImGuiContext) void {
-        _ = self;
+    pub fn postPresent(self: *ImGuiContext) void {
+        self.current_frame = (self.current_frame + 1) % @as(u32, @intCast(self.xfbs.len));
+
         // Update and Render additional Platform Windows
         const io: *c.ImGuiIO = c.igGetIO();
         if ((io.ConfigFlags & c.ImGuiConfigFlags_ViewportsEnable) != 0) {
@@ -248,16 +240,17 @@ pub const ImGuiContext = struct {
         }
     }
 
-    pub fn resize(self: *ImGuiContext, extent: vk.Extent2D) !void {
-        self.xfb.deinit(self.gc);
-        self.xfb = try ExternalFramebuffer.init(
-            self.gc,
-            self.imgui_render_pass,
-            self.xfb.format,
-            extent,
-            self.pool,
-            self.descriptor_set,
-        );
+    pub fn resize(self: *ImGuiContext, swapchain: *const Swapchain) !void {
+        for (self.xfbs, self.descriptor_sets) |*xfb, set| {
+            xfb.deinit(self.gc);
+            xfb.* = try ExternalFramebuffer.init(
+                self.gc,
+                self.imgui_render_pass,
+                swapchain.surface_format.format,
+                swapchain.extent,
+                set,
+            );
+        }
     }
 };
 
@@ -275,7 +268,6 @@ const ExternalFramebuffer = struct {
         render_pass: vk.RenderPass,
         format: vk.Format,
         extent: vk.Extent2D,
-        pool: vk.CommandPool,
         descriptor_set: vk.DescriptorSet,
     ) !ExternalFramebuffer {
         const image = try gc.vkd.createImage(gc.dev, &vk.ImageCreateInfo{
@@ -297,31 +289,6 @@ const ExternalFramebuffer = struct {
         errdefer gc.vkd.freeMemory(gc.dev, memory, null);
 
         try gc.vkd.bindImageMemory(gc.dev, image, memory, 0);
-
-        const barrier = vk.ImageMemoryBarrier{
-            .src_access_mask = .{},
-            .dst_access_mask = .{},
-            .image = image,
-            .old_layout = .undefined,
-            .new_layout = .shader_read_only_optimal,
-            .src_queue_family_index = 0,
-            .dst_queue_family_index = 0,
-            .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        };
-
-        const cmdbuf = try createSingleUseCommandBuffer(gc, pool);
-
-        const src_stage = vk.PipelineStageFlags{ .top_of_pipe_bit = true };
-        const dst_stage = vk.PipelineStageFlags{ .fragment_shader_bit = true };
-        gc.vkd.cmdPipelineBarrier(cmdbuf, src_stage, dst_stage, .{}, 0, null, 0, null, 1, @ptrCast(&barrier));
-
-        try finalizeSingleUseCommandBuffer(gc, cmdbuf, pool);
 
         const view = try gc.vkd.createImageView(gc.dev, &.{
             .image = image,
@@ -434,7 +401,7 @@ fn createRenderPass(gc: *const GraphicsContext, format: vk.Format) !vk.RenderPas
         .store_op = .store,
         .stencil_load_op = .dont_care,
         .stencil_store_op = .dont_care,
-        .initial_layout = .shader_read_only_optimal,
+        .initial_layout = .undefined,
         .final_layout = .shader_read_only_optimal,
     };
 

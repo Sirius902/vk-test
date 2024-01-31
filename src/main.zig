@@ -117,7 +117,7 @@ pub fn main() !void {
     }, null);
     defer gc.vkd.destroyCommandPool(gc.dev, pool, null);
 
-    var ic = try ImGuiContext.init(gc, render_pass, extent, pool, window, imgui_ini_path);
+    var ic = try ImGuiContext.init(gc, &swapchain, allocator, render_pass, window, imgui_ini_path);
     defer ic.deinit();
 
     const buffer = try gc.vkd.createBuffer(gc.dev, &.{
@@ -166,10 +166,8 @@ pub fn main() !void {
         }
 
         ic.render();
-        try ic.renderDrawDataToTexture();
 
         const cmdbuf = cmdbufs[swapchain.image_index];
-
         const current_image = try swapchain.acquireImage();
         try recordCommandBuffer(
             gc,
@@ -203,7 +201,7 @@ pub fn main() !void {
                 framebuffers,
             );
 
-            try ic.resize(extent);
+            try ic.resize(&swapchain);
 
             graphics_outdated = false;
         }
@@ -338,6 +336,8 @@ fn recordCommandBuffer(
         .extent = extent,
     };
 
+    try ic.renderDrawDataToTexture(cmdbuf);
+
     gc.vkd.cmdBeginRenderPass(cmdbuf, &.{
         .render_pass = render_pass,
         .framebuffer = framebuffer,
@@ -407,11 +407,23 @@ fn createRenderPass(gc: *const GraphicsContext, swapchain: Swapchain) !vk.Render
         .p_color_attachments = @ptrCast(&color_attachment_ref),
     };
 
+    // Wait for ImGui to finish rendering to texture before running fragment shader.
+    const imgui_dependency = vk.SubpassDependency{
+        .src_subpass = vk.SUBPASS_EXTERNAL,
+        .dst_subpass = 0,
+        .src_stage_mask = .{ .color_attachment_output_bit = true },
+        .dst_stage_mask = .{ .fragment_shader_bit = true },
+        .src_access_mask = .{ .color_attachment_write_bit = true },
+        .dst_access_mask = .{ .shader_read_bit = true },
+    };
+
     return try gc.vkd.createRenderPass(gc.dev, &.{
         .attachment_count = 1,
         .p_attachments = @as([*]const vk.AttachmentDescription, @ptrCast(&color_attachment)),
         .subpass_count = 1,
         .p_subpasses = @as([*]const vk.SubpassDescription, @ptrCast(&subpass)),
+        .dependency_count = 1,
+        .p_dependencies = @as([*]const vk.SubpassDependency, @ptrCast(&imgui_dependency)),
     }, null);
 }
 
